@@ -1,0 +1,49 @@
+# Virtual environment
+venv/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Model checkpoints / pretrained weights
+*.pth
+*.pt
+pretrained_ckpt/
+
+# Bulk processed image datasets (small CSV split metadata in data/isic2017/ is kept)
+data/isic2017/Image/
+data/isic2017/Image_clahe/
+data/isic2017/Image_dullrazor/
+data/isic2017/Label/
+
+# Raw ISIC 2017 data download
+isic2017_raw/
+
+# Training run outputs: per-fold checkpoints + per-epoch logs (tens of GB)
+results/
+kfold_logs/
+
+# Generated visualization/analysis dumps (not source)
+per_image_analysis/
+per_image_analysis_v2/
+per_image_analysis_official/
+
+# External cloned dependency (not authored here, has its own git history)
+dullrazor_repo/
+
+# Backed-up original AViT git history (not an active repo, just kept on disk)
+AViT/.git-siyiwind-backup/
+
+# Misc local logs, pid files, scratch build output
+*.log
+*.pid
+isic2017_key_code.zip
+review.html
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+
+# Claude Code local session/config
+.claude/
