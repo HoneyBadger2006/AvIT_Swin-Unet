@@ -17,6 +17,21 @@ def dice_loss(score, target):
 
 
 
+def focal_tversky_loss(score, target, alpha=0.7, gamma=4.0/3.0):
+    """Focal Tversky Loss (Abraham & Khan 2018). alpha weights false negatives,
+    (1-alpha) weights false positives (single-alpha convention, no separate beta).
+    FTL = (1 - TI) ** (1/gamma), TI = (TP+smooth) / (TP + alpha*FN + (1-alpha)*FP + smooth).
+    """
+    target = target.float()
+    smooth = 1e-5
+    tp = torch.sum(score * target)
+    fp = torch.sum(score * (1 - target))
+    fn = torch.sum((1 - score) * target)
+    tversky_index = (tp + smooth) / (tp + alpha * fn + (1 - alpha) * fp + smooth)
+    loss = torch.pow(1 - tversky_index, 1.0 / gamma)
+    return loss
+
+
 def dice_loss1(score, target):
     # non-square
     target = target.float()

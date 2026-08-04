@@ -16,8 +16,9 @@ import medpy.metric.binary as metrics
 from torch.utils.tensorboard import SummaryWriter
 
 from Datasets.create_dataset import Dataset_wrap_csv
-from Utils.losses import dice_loss
+from Utils.losses import dice_loss, focal_tversky_loss
 from Utils.pieces import DotDict
+from Utils.tta import tta_forward
 from segmentation_models_pytorch.losses import FocalLoss
 
 torch.cuda.empty_cache()
@@ -41,14 +42,27 @@ def compute_loss(config, criterion, output, label):
     If config.train.use_focal_loss is set, lambda * FocalLoss(output, label) is added on
     top of the model's base loss above (toggle, does not replace the base loss). FocalLoss
     takes the raw (pre-sigmoid) output, unlike the base losses above which use prob.
+
+    If config.train.use_focal_tversky_loss is set, the base loss above is REPLACED (for
+    every model, not just SwinUnet) with the compound loss
+    1*dice_loss + 2*focal_tversky_loss(alpha=0.7, gamma=4/3) + 0.5*BCE, matching the
+    FAT-Net compound-loss structure (Prof. Samavi-confirmed weights/alpha). Mutually
+    exclusive with use_focal_loss (enforced at arg-parse time).
     """
+    prob = torch.sigmoid(output)
+
+    if config.train.use_focal_tversky_loss:
+        bce = nn.functional.binary_cross_entropy_with_logits(output, label)
+        dice = dice_loss(prob, label)
+        ftl = focal_tversky_loss(prob, label, alpha=0.7, gamma=4.0 / 3.0)
+        loss = 1.0 * dice + 2.0 * ftl + 0.5 * bce
+        return loss, prob
+
     if config.model == 'SwinUnet':
-        prob = torch.sigmoid(output)
         bce = nn.functional.binary_cross_entropy_with_logits(output, label)
         dice = dice_loss(prob, label)
         loss = 0.4 * bce + 0.6 * dice
     else:
-        prob = torch.sigmoid(output)
         losses = [function(prob, label) for function in criterion]
         loss = sum(losses)
 
@@ -478,11 +492,19 @@ def train_val(config, model, train_loaders, val_loaders, criterion):
 
 # ========================================================================================================
 def test(config, model, model_dir, test_loaders, criterion):
+    """If config.test.use_tta is set, Dice/IOU are computed from a 5-view test-time-
+    augmentation soft-voting probability map (original + horizontal flip + vertical
+    flip + 90-degree rotation + 270-degree rotation, sigmoid-averaged before a single
+    threshold) instead of the standard single-pass probability map. The reported loss
+    is always from the standard single (non-augmented) pass regardless of use_tta,
+    since compute_loss's BCE/Focal terms need raw logits, not an ensembled probability.
+    """
     model.load_state_dict(torch.load(model_dir))
     model.eval()
     dice_test_list = []  # record results for each dataset
     iou_test_list = []
-    loss_test_list = [] 
+    loss_test_list = []
+    other_models = set(['SwinUNETR','UNETR','SwinUnet','MedFormer','UTNet'])
     # test each dataset
     for dataset_name in config.data.name:
         dice_test_sum= 0
@@ -498,23 +520,33 @@ def test(config, model, model_dir, test_loaders, criterion):
             else:
                 d = str(data2domain[dataset_name])
             batch_len = img.shape[0]
-            other_models = set(['SwinUNETR','UNETR','SwinUnet','MedFormer','UTNet'])
             with torch.no_grad():
                 if config.model in other_models:
                     output = model(img)
                 else:
                     output = model(img,d=d)['seg']
 
-                # calculate loss
-                loss, output = compute_loss(config, criterion, output, label)
-                assert (output.shape == label.shape)
+                # calculate loss (always from the standard single pass)
+                loss, prob = compute_loss(config, criterion, output, label)
+                assert (prob.shape == label.shape)
                 loss_test_sum += loss*batch_len
 
-                # calculate metrics
-                output = output.cpu().numpy() > 0.5
+                # calculate metrics: TTA-averaged probability map if enabled, else the
+                # standard single-pass probability map, thresholded once at 0.5.
+                if config.test.use_tta:
+                    def forward_fn(x, _d=d):
+                        if config.model in other_models:
+                            return model(x)
+                        else:
+                            return model(x, d=_d)['seg']
+                    eval_prob, _ = tta_forward(forward_fn, img)
+                else:
+                    eval_prob = prob
+
+                eval_prob = eval_prob.cpu().numpy() > 0.5
                 label = label.cpu().numpy()
-                dice_test_sum += metrics.dc(output, label)*batch_len
-                iou_test_sum += metrics.jc(output, label)*batch_len
+                dice_test_sum += metrics.dc(eval_prob, label)*batch_len
+                iou_test_sum += metrics.jc(eval_prob, label)*batch_len
 
                 num_test += batch_len
                 # end one test batch
@@ -570,6 +602,15 @@ if __name__=='__main__':
                         help='Add lambda * FocalLoss on top of the model\'s base loss.')
     parser.add_argument('--focal_lambda', type=float, default=1.0,
                         help='Weight applied to the Focal Loss term when --use_focal_loss is set.')
+    parser.add_argument('--use_focal_tversky_loss', action='store_true', default=False,
+                        help='Replace the model\'s base loss with the compound loss '
+                             '1*Dice + 2*FocalTversky(alpha=0.7, gamma=4/3) + 0.5*BCE. '
+                             'Mutually exclusive with --use_focal_loss.')
+    parser.add_argument('--use_tta', action='store_true', default=False,
+                        help='At test time, compute Dice/IOU from a 5-view soft-voting '
+                             'test-time-augmentation probability map (original + h-flip + '
+                             'v-flip + rot90 + rot270) instead of a single forward pass. '
+                             'Does not affect training or the reported loss.')
     parser.add_argument('--only_test', action='store_true', default=False,
                         help='Skip training; only run test() on --test_model_dir.')
     parser.add_argument('--test_model_dir', type=str, default=None,
@@ -584,6 +625,9 @@ if __name__=='__main__':
                         help='Override which subdirectory under the dataset folder images are '
                              'loaded from (defaults to \'Image\'), e.g. \'Image_dullrazor\'.')
     args = parser.parse_args()
+    if args.use_focal_loss and args.use_focal_tversky_loss:
+        parser.error('--use_focal_loss and --use_focal_tversky_loss are mutually exclusive '
+                      '(the latter replaces the base loss entirely; the former adds to it).')
     config = yaml.load(open(args.config_yml), Loader=yaml.FullLoader)
     config['model'] = args.model
     config['train']['batch_size']=args.batch_size
@@ -598,6 +642,8 @@ if __name__=='__main__':
         config['train']['num_epochs'] = args.num_epochs
     config['train']['use_focal_loss'] = args.use_focal_loss
     config['train']['focal_lambda'] = args.focal_lambda
+    config['train']['use_focal_tversky_loss'] = args.use_focal_tversky_loss
+    config['test']['use_tta'] = args.use_tta
     if args.only_test:
         config['test']['only_test'] = True
         config['test']['test_model_dir'] = args.test_model_dir
