@@ -27,7 +27,8 @@ def norm01(x):
 
 
 def Dataset_wrap_csv(k_fold='No', use_old_split=True, img_size=384, dataset_name='isic2018', split_ratio=[0.8, 0.2], train_aug=False,
-    data_folder='/bigdata/siyiplace/data/skin_lesion', meta_csv_name=None, fixed_test_csv_name=None, image_subdir=None):
+    data_folder='/bigdata/siyiplace/data/skin_lesion', meta_csv_name=None, fixed_test_csv_name=None, image_subdir=None,
+    norm_mean=None, norm_std=None):
     '''
     use train val test csv to load the whole datasets in order to include domain (dataset) label
     if k_fold is a number, means we use k-fold to do experiments, load k_fold index data. default 5 folders
@@ -46,6 +47,9 @@ def Dataset_wrap_csv(k_fold='No', use_old_split=True, img_size=384, dataset_name
     image_subdir: override which subdirectory under data_path/ images are loaded from
         (defaults to 'Image'). Lets a preprocessed variant (e.g. 'Image_dullrazor') be used
         as a drop-in replacement, with Label/ untouched.
+    norm_mean, norm_std: override the per-channel normalization stats applied after the
+        [0,1] rescale (defaults to RGB ImageNet stats). Needed for non-RGB color spaces
+        (e.g. HSV) where the ImageNet constants have no natural correspondence.
     return train val test in a dic
     '''
     data_dic = {}
@@ -61,7 +65,7 @@ def Dataset_wrap_csv(k_fold='No', use_old_split=True, img_size=384, dataset_name
     def _attach_fixed_test(dic):
         if fixed_test_csv_name:
             fixed_test_df = pd.read_csv(data_path+fixed_test_csv_name, dtype={'ID': str})
-            dic['test'] = SkinDataset_csv(dataset_name, img_size, fixed_test_df, use_aug=False, data_path=data_path, image_subdir=img_subdir)
+            dic['test'] = SkinDataset_csv(dataset_name, img_size, fixed_test_df, use_aug=False, data_path=data_path, image_subdir=img_subdir, norm_mean=norm_mean, norm_std=norm_std)
             print('Using FIXED test set from {}: {} samples (identical across all folds)'
             .format(fixed_test_csv_name, len(fixed_test_df)))
         return dic
@@ -72,8 +76,8 @@ def Dataset_wrap_csv(k_fold='No', use_old_split=True, img_size=384, dataset_name
             try:
                 train_df = pd.read_csv(data_path+'train_meta_kfold{}_{}.csv'.format(fold_tag, k_fold), dtype={'ID': str})
                 held_out_df = pd.read_csv(data_path+'test_meta_kfold{}_{}.csv'.format(fold_tag, k_fold), dtype={'ID': str})
-                data_dic['train'] = SkinDataset_csv(dataset_name, img_size, train_df, use_aug=train_aug, data_path=data_path, image_subdir=img_subdir)
-                data_dic['val'] = SkinDataset_csv(dataset_name, img_size, held_out_df, use_aug=False, data_path=data_path, image_subdir=img_subdir)
+                data_dic['train'] = SkinDataset_csv(dataset_name, img_size, train_df, use_aug=train_aug, data_path=data_path, image_subdir=img_subdir, norm_mean=norm_mean, norm_std=norm_std)
+                data_dic['val'] = SkinDataset_csv(dataset_name, img_size, held_out_df, use_aug=False, data_path=data_path, image_subdir=img_subdir, norm_mean=norm_mean, norm_std=norm_std)
                 data_dic['test'] = data_dic['val']
                 data_size = len(data_dic['train'])+len(data_dic['val'])
                 print('{} has {} samples, {} are used to train, {} are used to val. \n 5 Folder -- Use {}'
@@ -100,8 +104,8 @@ def Dataset_wrap_csv(k_fold='No', use_old_split=True, img_size=384, dataset_name
 
         train_df = pd.read_csv(data_path+'train_meta_kfold{}_{}.csv'.format(fold_tag, k_fold), dtype={'ID': str})
         held_out_df = pd.read_csv(data_path+'test_meta_kfold{}_{}.csv'.format(fold_tag, k_fold), dtype={'ID': str})
-        data_dic['train'] = SkinDataset_csv(dataset_name, img_size, train_df, use_aug=train_aug, data_path=data_path, image_subdir=img_subdir)
-        data_dic['val'] = SkinDataset_csv(dataset_name, img_size, held_out_df, use_aug=False, data_path=data_path, image_subdir=img_subdir)
+        data_dic['train'] = SkinDataset_csv(dataset_name, img_size, train_df, use_aug=train_aug, data_path=data_path, image_subdir=img_subdir, norm_mean=norm_mean, norm_std=norm_std)
+        data_dic['val'] = SkinDataset_csv(dataset_name, img_size, held_out_df, use_aug=False, data_path=data_path, image_subdir=img_subdir, norm_mean=norm_mean, norm_std=norm_std)
         data_dic['test'] = data_dic['val']
         assert data_size == len(data_dic['train'])+len(data_dic['val'])
         print('Finish creating new 5 folders. {} has {} samples, {} are used to train, {} are used to val. \n 5 Folder -- Use {}'
@@ -149,7 +153,8 @@ def Dataset_wrap_csv(k_fold='No', use_old_split=True, img_size=384, dataset_name
 
 class SkinDataset_csv(torch.utils.data.Dataset):
     def __init__(self, dataset_name, img_size, df, use_aug=False,
-        data_path='/bigdata/siyiplace/data/skin_lesion/isic2018/', image_subdir='Image'):
+        data_path='/bigdata/siyiplace/data/skin_lesion/isic2018/', image_subdir='Image',
+        norm_mean=None, norm_std=None):
         super(SkinDataset_csv, self).__init__()
 
         self.dataset_name = dataset_name
@@ -172,8 +177,9 @@ class SkinDataset_csv(torch.utils.data.Dataset):
         self.transf = A.Compose([
             A.Resize(img_size, img_size),
         ])
-        self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                              std=[0.229, 0.224, 0.225])
+        norm_mean = norm_mean if norm_mean is not None else [0.485, 0.456, 0.406]
+        norm_std = norm_std if norm_std is not None else [0.229, 0.224, 0.225]
+        self.normalize = transforms.Normalize(mean=norm_mean, std=norm_std)
     
 
     def __getitem__(self, index):

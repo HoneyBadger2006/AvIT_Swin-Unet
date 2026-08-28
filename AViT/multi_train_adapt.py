@@ -6,8 +6,10 @@ import argparse
 from sqlite3 import adapt
 import yaml
 import os, time
+import random
 from datetime import datetime
 
+import numpy as np
 import pandas as pd
 import torch.nn as nn
 import torch.utils.data
@@ -22,6 +24,33 @@ from Utils.tta import tta_forward
 from segmentation_models_pytorch.losses import FocalLoss
 
 torch.cuda.empty_cache()
+
+
+def set_seed(seed):
+    """Fixes every stochastic source this script touches: Python/numpy RNG (used by
+    albumentations' random augmentations in worker processes), and torch's CPU/CUDA
+    RNG (used by model weight init for any non-pretrained layers, dropout, and the
+    default DataLoader shuffle generator). Also disables cuDNN's algorithm
+    auto-tuning (nondeterministic across runs) in favor of its deterministic kernels.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def seed_worker(worker_id):
+    """Per the official PyTorch reproducibility recipe: each DataLoader worker
+    process needs its own explicit seed, derived from the (already-seeded) main
+    process's generator state, since worker processes don't otherwise inherit a
+    deterministic Python/numpy RNG state (true on Windows, which always spawns
+    fresh interpreters rather than forking)."""
+    worker_seed = torch.initial_seed() % 2 ** 32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
 
 # No learnable params, so a single shared instance is fine across models/folds.
 # gamma=2.0, alpha=0.25 are the RetinaNet-paper starting values. Operates on raw
@@ -85,15 +114,20 @@ def main(config):
             dataset_name = dataset_name, split_ratio=config.data.split_ratio,
             train_aug=config.data.train_aug, data_folder=config.data.data_folder,
             meta_csv_name=config.data.meta_csv_name, fixed_test_csv_name=config.data.fixed_test_csv_name,
-            image_subdir=config.data.image_subdir)
+            image_subdir=config.data.image_subdir, norm_mean=config.data.norm_mean, norm_std=config.data.norm_std)
         train_data, val_data, test_data = datas['train'], datas['val'], datas['test']
 
+        loader_kwargs = {}
+        if config.seed is not None:
+            loader_kwargs['worker_init_fn'] = seed_worker
+            loader_kwargs['generator'] = torch.Generator().manual_seed(config.seed)
         train_loader = torch.utils.data.DataLoader(train_data,
                                                 batch_size=config.train.batch_size,
                                                 shuffle=True,
                                                 num_workers=config.train.num_workers,
                                                 pin_memory=True,
-                                                drop_last=True)
+                                                drop_last=True,
+                                                **loader_kwargs)
         val_loader = torch.utils.data.DataLoader(val_data,
                                                 batch_size=config.test.batch_size,
                                                 shuffle=False,
@@ -483,9 +517,11 @@ def train_val(config, model, train_loaders, val_loaders, criterion):
         # end one epoch
         if config.debug: return
     
+    torch.save(model.state_dict(), final_model_dir)
+    print('Saved final-epoch checkpoint: {}'.format(final_model_dir))
     print('Complete training ---------------------------------------------------- \n The best epoch is {}'.format(best_epoch))
 
-    return 
+    return
 
 
 
@@ -624,7 +660,19 @@ if __name__=='__main__':
     parser.add_argument('--image_subdir', type=str, default=None,
                         help='Override which subdirectory under the dataset folder images are '
                              'loaded from (defaults to \'Image\'), e.g. \'Image_dullrazor\'.')
+    parser.add_argument('--norm_mean', type=float, nargs=3, default=None,
+                        help='Override the 3 per-channel normalization means (defaults to RGB '
+                             'ImageNet stats). Needed for non-RGB color spaces, e.g. HSV.')
+    parser.add_argument('--norm_std', type=float, nargs=3, default=None,
+                        help='Override the 3 per-channel normalization stds (defaults to RGB '
+                             'ImageNet stats). Needed for non-RGB color spaces, e.g. HSV.')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Fixed random seed for model init, data shuffling, augmentation, '
+                             'and cuDNN determinism. If unset (default), training is unseeded '
+                             '(the historical, non-reproducible behavior).')
     args = parser.parse_args()
+    if args.seed is not None:
+        set_seed(args.seed)
     if args.use_focal_loss and args.use_focal_tversky_loss:
         parser.error('--use_focal_loss and --use_focal_tversky_loss are mutually exclusive '
                       '(the latter replaces the base loss entirely; the former adds to it).')
@@ -638,6 +686,9 @@ if __name__=='__main__':
     config['data']['meta_csv_name'] = args.meta_csv_name
     config['data']['fixed_test_csv_name'] = args.fixed_test_csv_name
     config['data']['image_subdir'] = args.image_subdir
+    config['data']['norm_mean'] = args.norm_mean
+    config['data']['norm_std'] = args.norm_std
+    config['seed'] = args.seed
     if args.num_epochs is not None:
         config['train']['num_epochs'] = args.num_epochs
     config['train']['use_focal_loss'] = args.use_focal_loss
@@ -661,6 +712,7 @@ if __name__=='__main__':
     os.makedirs(exp_dir, exist_ok=True)
     writer = SummaryWriter(exp_dir)
     best_model_dir = '{}/best.pth'.format(exp_dir)
+    final_model_dir = '{}/final.pth'.format(exp_dir)
     test_results_dir = '{}/test_results.csv'.format(exp_dir)
 
     # store yml file

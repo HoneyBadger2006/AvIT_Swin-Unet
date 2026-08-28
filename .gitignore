@@ -14,8 +14,12 @@ pretrained_ckpt/
 # Bulk processed image datasets (small CSV split metadata in data/isic2017/ is kept)
 data/isic2017/Image/
 data/isic2017/Image_clahe/
+data/isic2017/Image_clahe_aug/
 data/isic2017/Image_dullrazor/
+data/isic2017/Image_hsv/
+data/isic2017/Image_ycbcr/
 data/isic2017/Label/
+data/isic2017/Label_aug/
 
 # Raw ISIC 2017 data download
 isic2017_raw/
