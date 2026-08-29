@@ -368,6 +368,64 @@ As of this analysis, ranked by Dice on the 600-image official test set
 | 5 | 3-network ensemble, equal-weight | 0.8459 | 0.7626 |
 | 6 | AViT alone | 0.7946 | 0.7025 |
 
+## EGE-UNet's own hard-image augmentation pilot — negative result, stopping here
+
+Same method used to build SwinUnet's 37-image and AViT's 189-image
+hard-image sets, applied to EGE-UNet itself: trained a clean baseline (2000
+official training images, no augmentation, no CV, seed 42, CLAHE, EGE-UNet's
+own 300-epoch recipe — best val_loss=0.9810 @ epoch 296), then evaluated
+that single checkpoint against both its own 2000 training images and the
+600 official test images (single pass, no TTA, threshold 0.5 — matching how
+the original SwinUnet/AViT bad-image sets were identified, not the
+TTA+Method A protocol used for the production/ensemble numbers elsewhere in
+this README).
+
+- **94 hard training images** (Dice<0.7 of 2000, baseline mean 0.8965) →
+  `bad_images_egeunet_seed42_dice94.csv`
+- **58 hard test images** (Dice<0.7 of 600, baseline mean 0.8576) →
+  `bad_images_egeunet_seed42_test58.csv`
+
+Augmented via `AViT/build_shift_augmentation.py` (fully reused, unmodified)
+— 94×5 = 470 images, all 5 techniques, 0 skips — merged into the canonical
+`Image_clahe`/`Label` dirs. Pilot trained on the combined 2470-image set,
+same recipe, 300 epochs (best val_loss=1.0239 @ epoch 128; this run crashed
+twice on native CUDA aborts from concurrent GPU load and was resumed twice
+using newly-added checkpoint-resume support in `train.py` — final result
+below is from the completed run, not affected by the crashes themselves).
+
+| | n | Baseline mean Dice | Pilot mean Dice | Still bad (Dice<0.7) |
+|---|---|---|---|---|
+| Hard training images | 94 | 0.5529 | **0.7619** | 25/94 (was 94/94) |
+| Hard test images | 58 | 0.4632 | 0.4739 | 47/58 (was 58/58 by construction) |
+| **Full test600** | 600 | **0.8576** | **0.8491** | 68/600 (was 58/600) |
+
+| Paired one-sided t-test | n | mean_diff (pilot − baseline) | p (one-sided) | Gate (diff>0.003 & p<0.05) |
+|---|---|---|---|---|
+| **Full test600** | 600 | **−0.0085** | **0.995** | **fails — decision: stop** |
+| Hard subset (58) | 58 | +0.0106 | 0.323 | fails (not significant) |
+
+**Training-side recovery is real and strong** — 69 of 94 targeted images
+recovered above Dice 0.7 (mean 0.55→0.76) — the model clearly learned the
+augmented copies. **That does not transfer.** On the full test set the
+pilot is *directionally worse* than the clean baseline (mean_diff=−0.85pp,
+p=0.995 — strong evidence against improvement, not just "no evidence for
+it"), and even on EGE-UNet's own hard test images the +1.06pp gain is not
+statistically significant (p=0.32, 50/50 split between images that improved
+and worsened). This is a textbook overfitting signature: memorizing 94
+augmented training images without generalizing, unlike SwinUnet's own
+shift37 pilot (which was at least directionally positive, mean_diff=+0.40pp,
+just short of the significance bar) or AViT's shift189 pilot (which passed
+significance and is queued for a full 5-fold sweep).
+
+**Decision: stop, per the same bar used for every other technique in this
+project (`mean_diff > 0.003 and p_one_sided < 0.05` on the full test600).**
+No 5-fold sweep for EGE-UNet's hard-image augmentation — the pilot doesn't
+clear it, and directionally points the wrong way. Reported as a negative
+result rather than omitted, same discipline as the rest of this repo.
+
+Full summary: `per_image_analysis_v2/overnight_run/egeunet_dice94_pilot_summary.json`.
+Per-image CSVs: `EGE-UNet/results/pilot_egeunet_dice94_shift5/{hardtrain94,hardtest58,test600}_per_image.csv`.
+
 ## Open items still pending
 
 - **Ensemble scope decision**: the best-known configuration (2-network,
@@ -378,3 +436,8 @@ As of this analysis, ranked by Dice on the 600-image official test set
   (different architecture variant, more training data, a non-linear
   combination scheme) before deciding definitively, is a decision point for
   Prof. Samavi — not resolved in this write-up.
+- **EGE-UNet's own hard-image augmentation does not help** (see above) —
+  the production EGE-UNet checkpoint used in the ensemble comparison remains
+  the original `official_seed42` run (trained on SwinUnet's 37-image
+  augmented set, per the earlier task), not this pilot. No action taken to
+  swap it out.

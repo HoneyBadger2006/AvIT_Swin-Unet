@@ -30,8 +30,20 @@ kfold_logs/
 
 # Generated visualization/analysis dumps (not source)
 per_image_analysis/
-per_image_analysis_v2/
 per_image_analysis_official/
+
+# per_image_analysis_v2/ is excluded recursively EXCEPT the 4 small EGE-UNet
+# hard-image CSVs below (source-of-truth image ID lists + augmentation
+# manifest for EGE-UNet's own hard-image pilot, kept for reproducibility).
+# gitignore requires negating each ancestor directory level with a trailing
+# /* (not a bare trailing /) for the file-level negations to take effect.
+per_image_analysis_v2/*
+!per_image_analysis_v2/bad_image_augmentation/
+per_image_analysis_v2/bad_image_augmentation/*
+!per_image_analysis_v2/bad_image_augmentation/bad_images_egeunet_seed42_dice94.csv
+!per_image_analysis_v2/bad_image_augmentation/bad_images_egeunet_seed42_test58.csv
+!per_image_analysis_v2/bad_image_augmentation/manifest_egeunet_seed42_dice94_shift5.csv
+!per_image_analysis_v2/bad_image_augmentation/shift_skip_report_egeunet94.csv
 
 # External cloned dependency (not authored here, has its own git history)
 dullrazor_repo/

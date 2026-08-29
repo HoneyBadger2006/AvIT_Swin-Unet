@@ -167,9 +167,30 @@ def main():
     history = []
     min_loss = float("inf")
     min_epoch = 0
+    start_epoch = 1
     t0 = time.time()
 
-    for epoch in range(1, args.epochs + 1):
+    latest_path = ckpt_dir / "latest.pth"
+    history_path = out_dir / "history.json"
+    if latest_path.exists() and history_path.exists():
+        # Resume after a crash (e.g. a CUDA abort from GPU contention with
+        # another process): latest.pth already has model/optimizer/scheduler
+        # state, so pick up right after its epoch rather than restarting from
+        # epoch 1. Not bit-identical to an uninterrupted run (dataloader
+        # shuffle order and RNG state differ across the resume boundary) --
+        # an accepted tradeoff, not a correctness concern for this recipe.
+        ckpt = torch.load(latest_path, map_location="cuda", weights_only=True)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        min_loss, min_epoch = ckpt["min_loss"], ckpt["min_epoch"]
+        start_epoch = ckpt["epoch"] + 1
+        history = json.loads(history_path.read_text())
+        t0 = time.time() - history[-1]["elapsed_s"]
+        print(f"Resuming from epoch {start_epoch} (latest.pth was at epoch {ckpt['epoch']}, "
+              f"best={min_loss:.4f}@{min_epoch})", flush=True)
+
+    for epoch in range(start_epoch, args.epochs + 1):
         torch.cuda.empty_cache()
         train_loss = train_one_epoch(train_loader, model, criterion, optimizer, epoch)
         scheduler.step()
